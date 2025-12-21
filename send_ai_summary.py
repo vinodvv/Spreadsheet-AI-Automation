@@ -1,25 +1,26 @@
 import os
+from datetime import datetime
+
+from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from langchain.chat_models import init_chat_model
-from dotenv import load_dotenv
-from datetime import datetime
 
 import smtplib
 from email.mime.text import MIMEText
 
+# Load .env once at module import
+load_dotenv()
+
 
 def load_credentials():
-    """Load credentials from .env file"""
-    load_dotenv()
-
+    """Load credentials from environment variables and validate them."""
     google_api_key = os.getenv("GOOGLE_API_KEY")
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     sheet_name = os.getenv("SHEET_NAME")
 
     # Validate credentials
-    if not all ([google_api_key, spreadsheet_id, sheet_name]):
-        print("❌ Missing credentials in .env")
-        return False
+    if not google_api_key or not spreadsheet_id or not sheet_name:
+        raise RuntimeError("Missing GOOGLE_API_KEY, SPREADSHEET_ID OR SHEET_NAME in .env")
 
     return google_api_key, spreadsheet_id, sheet_name
 
@@ -42,26 +43,33 @@ def save_row_count(sheet_name, count):
 
     # Read existing data
     try:
-        with open(tracking_file, "w") as file:
+        with open(tracking_file, "w", encoding="utf-8") as file:
             file.write(str(count))
-        print(f"✔️ Saved count {count} to {tracking_file}")
-    except FileNotFoundError:
-        pass
+        # print(f"✔️ Saved count {count} to {tracking_file}")
+    except OSError as exc:
+        # Log but do not crash the whole flow
+        print(f"⚠️ Failed to save row count: {exc}")
 
 
 def get_last_row_count(sheet_name):
     """Get the last known row count for a specific sheet."""
     tracking_file = f"row_count_{sheet_name}.txt"
     try:
-        with open(tracking_file, "r") as file:
+        with open(tracking_file, "r", encoding="utf-8") as file:
             count = file.read().strip()
-            print(f"✔️ Read from file: {count}")
+            if not count:
+                print(f"✔️ Empty tacking file for {sheet_name}, treating as 0.")
+                return 0
+            # print(f"✔️ Read from file: {count}")
             return int(count)
     except FileNotFoundError:
         print(f"✔️ No tracking file found for {sheet_name}.")
         return 0  # First time running, no previous count.
     except ValueError:
         print(f"✔️ Invalid data in file, resetting to 0.")
+        return 0
+    except OSError as exc:
+        print(f"⚠️ Error reading tracking file: {exc}")
         return 0
 
 
@@ -76,12 +84,11 @@ def detect_new_rows(current_row_count, last_row_count):
 
 def get_new_rows(sheet, new_row_count):
     """Extract the new rows from the spreadsheet"""
-    if new_row_count > 0:
-        # Get the last 'new_row_count' rows
-        new_rows = sheet[-new_row_count:]
-        return new_rows
-    else:
+    if new_row_count <= 0:
         return []
+    # Get the last 'new_row_count' rows
+    new_rows = sheet[-new_row_count:]
+    return new_rows
 
 
 def check_for_new_rows():
@@ -90,18 +97,9 @@ def check_for_new_rows():
     google_api_key, spreadsheet_id, sheet_name = load_credentials()
     rows = get_spreadsheet_data(google_api_key, spreadsheet_id, sheet_name)
 
-    # print("ALL ROWS:")
-    # for i, row in enumerate(rows, 1):
-    #     print(f"Row {i}: {row}")
-    # print(f"{len(rows)} rows total.")
-
     # Get counts
     current_row_count = get_current_row_count(rows)
     last_row_count = get_last_row_count(sheet_name)
-
-    # print(f"Sheet: {sheet_name}")
-    # print(f"Last row count: {last_row_count}")
-    # print(f"Current row count: {current_row_count}")
 
     # check for new rows
     has_new_rows, new_row_count = detect_new_rows(current_row_count, last_row_count)
@@ -111,9 +109,9 @@ def check_for_new_rows():
 
         # Get and display new rows
         new_rows = get_new_rows(rows, new_row_count)
-        print("\nNew rows added:")
-        for i, row in enumerate(new_rows, start=1):
-            print(f"Row {i}: {row}")
+        # print("\nNew rows added:")
+        # for i, row in enumerate(new_rows, start=1):
+        #     print(f"Row {i}: {row}")
 
         # Save the new count
         save_row_count(sheet_name, current_row_count)
@@ -126,8 +124,6 @@ def check_for_new_rows():
 
 def init_llm():
     """Initialize Gemini chat model via Langchain"""
-    load_dotenv()
-
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError("Missing GOOGLE_API_KEY in .env")
@@ -164,38 +160,43 @@ def summarize_new_rows(llm, new_rows):
 
     # Invoke model with prompt
     response = llm.invoke(prompt)
-    return response.content
+    return getattr(response, "content", str(response))
 
 
-def send_email_summary(summary, new_row_count):
-    """Send email with the AI summary of new rows"""
-    load_dotenv()
-
+def load_email_credentials():
+    """Load and validate email-related environment variables"""
     sender_email = os.getenv("SENDER_EMAIL")
     sender_password = os.getenv("SENDER_PASSWORD")
     recipient_email = os.getenv("RECIPIENT_EMAIL")
 
     # Validate credentials
-    if not all([sender_email, sender_password, recipient_email]):
-        print("❌ Missing email credentials in .env file")
+    if not sender_email or not sender_password or not recipient_email:
+        raise RuntimeError("Missing email credentials in .env file")
+
+    return sender_email, sender_password, recipient_email
+
+
+def send_email_summary(summary, new_row_count):
+    """Send email with the AI summary of new rows"""
+    try:
+        sender_email, sender_password, recipient_email = load_email_credentials()
+    except RuntimeError as exc:
+        print(f"❌ {exc}")
         return False
 
     # Create email
     subject = f"Spreadsheet Update: {new_row_count} New Row(s) Added"
 
     # Email body
-    body = f"""Hello,
-
-Your Google Sheet has been updated with {new_row_count} new row(s).
-
-=== AI Summary ===
-{summary}
-
-
----
-This is an automated notification from Spreadsheet AI Automation system.
-Timestamp: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-"""
+    body = (
+        f"Hello,\n\n"
+        f"Your Google Sheet has been updated with {new_row_count} new row(s).\n\n"
+        f"=== AI Summary ===\n"
+        f"{summary}\n\n"
+        f"---\n"
+        f"This is an automated notification from Spreadsheet AI Automation system.\n"
+        f"Timestamp: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"
+    )
 
     # Create message object
     message = MIMEText(body)
@@ -205,18 +206,15 @@ Timestamp: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
     # Send email via Gmail SMTP
     try:
-        print("📧 Connecting to Gmail SMTP server...")
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()  # Secure connection
+        # print("📧 Connecting to Gmail SMTP server...")
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.starttls()  # Secure connection
+            # print("🔐 Logging in...")
+            server.login(sender_email, sender_password)
+            print("📤 Sending email...")
+            server.send_message(message)
 
-        print("🔐 Logging in...")
-        server.login(sender_email, sender_password)
-
-        print("📤 Sending email...")
-        server.send_message(message)
-        server.quit()
-
-        print(f"✔️ Email sent successfully to {recipient_email}")
+        # print(f"✔️ Email sent successfully to {recipient_email}")
         return True
 
     except Exception as e:
@@ -224,29 +222,30 @@ Timestamp: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         return False
 
 
-if __name__ == "__main__":
-    # Temporary quick test
-    # llm = init_llm()
-    # response = llm.invoke("Summarize this in one sentence: I am testing my Gemini + LangChain setup.")
-    # print("LLM reply:", response.content)
-
+def main():
     check_date_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Starting spreadsheet check at {check_date_time}...")
+
     new_rows = check_for_new_rows()
-
-    if new_rows:
-        llm = init_llm()
-        summary = summarize_new_rows(llm, new_rows)
-        print("\n=== AI SUMMARY OF NEW ROWS ===")
-        print(summary)
-
-        # Send email with summary
-        print("\n📧 Preparing to send email...")
-        email_sent = send_email_summary(summary, len(new_rows))
-
-        if email_sent:
-            print("✔️ Email sent successfully!")
-        else:
-            print("⚠️ Email sending failed, but summary was generated.")
-    else:
+    if not new_rows:
         print("\nNo new rows, nothing to summarize.")
+        return
+
+    llm = init_llm()
+    summary = summarize_new_rows(llm, new_rows)
+    #
+    # print("\n=== AI SUMMARY OF NEW ROWS ===")
+    # print(summary)
+
+    # Send email with summary
+    print("\n📧 Preparing to send email...")
+    email_sent = send_email_summary(summary, len(new_rows))
+
+    if email_sent:
+        print("✔️ Email sent successfully!")
+    else:
+        print("⚠️ Email sending failed, but summary was generated.")
+
+
+if __name__ == "__main__":
+    main()
