@@ -92,7 +92,11 @@ def get_new_rows(sheet, new_row_count):
 
 
 def check_for_new_rows():
-    """Check and display new rows"""
+    """
+    Check and display new rows
+    Returns tuple (new_rows, current_row_count, sheet_name)
+    Does NOT update the tracking file - that happens only after successful email.
+    """
     # Load credentials and get data
     google_api_key, spreadsheet_id, sheet_name = load_credentials()
     rows = get_spreadsheet_data(google_api_key, spreadsheet_id, sheet_name)
@@ -112,14 +116,12 @@ def check_for_new_rows():
         # print("\nNew rows added:")
         # for i, row in enumerate(new_rows, start=1):
         #     print(f"Row {i}: {row}")
-
-        # Save the new count
-        save_row_count(sheet_name, current_row_count)
-        return new_rows
+        return new_rows, current_row_count, sheet_name
     else:
         print("✔️ No new rows added.")
+        # Safe to update when no changes
         save_row_count(sheet_name, current_row_count)
-        return []
+        return [], current_row_count, sheet_name
 
 
 def init_llm():
@@ -226,11 +228,13 @@ def main():
     check_date_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Starting spreadsheet check at {check_date_time}...")
 
-    new_rows = check_for_new_rows()
+    new_rows, current_row_count, sheet_name = check_for_new_rows()
+
     if not new_rows:
         print("\nNo new rows, nothing to summarize.")
         return
 
+    # Generate AI summary
     llm = init_llm()
     summary = summarize_new_rows(llm, new_rows)
     #
@@ -243,8 +247,11 @@ def main():
 
     if email_sent:
         print("✔️ Email sent successfully!")
+        # ONLY update row count after successful email
+        save_row_count(sheet_name, current_row_count)
     else:
-        print("⚠️ Email sending failed, but summary was generated.")
+        print("⚠️ Email sending failed. Row count NOT updated. Summary was generated.")
+        print("⚠️ These rows will be processed again on the next run.")
 
 
 if __name__ == "__main__":
